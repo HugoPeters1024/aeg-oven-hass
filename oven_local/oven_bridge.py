@@ -236,10 +236,20 @@ def main():
     def diag():
         while not stop.is_set():
             time.sleep(20)
-            out = sh("iptables -t nat -L PREROUTING -n -v").stdout
-            for ln in out.splitlines():
-                if "REDIRECT" in ln or str(LISTEN_PORT) in ln:
-                    log("info", "REDIRECT counters: " + " ".join(ln.split()))
+            for ln in sh("iptables -t nat -L PREROUTING -n -v").stdout.splitlines():
+                if "REDIRECT" in ln:
+                    p = ln.split(); log("info", f"REDIRECT rule: pkts={p[0]} bytes={p[1]}")
+            for ln in sh("iptables -L FORWARD -n -v").stdout.splitlines():
+                if "REJECT" in ln and OVEN in ln:
+                    p = ln.split(); log("info", f"FORWARD-reject rule: pkts={p[0]} bytes={p[1]}")
+            # are ANY oven 8883 packets even reaching this Pi? (proves the ARP diversion works)
+            cap = sh(f"timeout 6 tcpdump -i {iface} -nn -c 6 host {OVEN} and tcp port 8883 2>&1")
+            n = sum(1 for l in cap.stdout.splitlines() if OVEN in l and ">" in l)
+            log("info", f"oven:8883 packets seen at Pi in ~6s: {n}")
+            # and is the oven talking to the cloud at all (any traffic to it)?
+            cap2 = sh(f"timeout 4 tcpdump -i {iface} -nn -c 6 host {OVEN} 2>&1")
+            n2 = sum(1 for l in cap2.stdout.splitlines() if OVEN in l and ">" in l)
+            log("info", f"any oven packets seen at Pi in ~4s: {n2}")
     threading.Thread(target=diag, daemon=True).start()
 
     def poison(a,am,sp): sendp(Ether(dst=am)/ARP(op=2,pdst=a,hwdst=am,psrc=sp,hwsrc=my_mac),iface=iface)
