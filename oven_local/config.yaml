@@ -1,0 +1,34 @@
+name: "AEG Oven Local Bridge"
+version: "0.1.0"
+slug: "oven_local"
+description: "Local bridge for an AEG/Electrolux oven. Impersonates the Electrolux MQTT broker on the LAN (ARP redirect) and publishes the oven's telemetry to Home Assistant via MQTT discovery. Proof of concept."
+url: "https://github.com/hugop/aeg-oven-local"
+arch:
+  - aarch64
+  - amd64
+  - armv7
+startup: application
+boot: manual
+init: false
+host_network: true
+privileged:
+  - NET_ADMIN
+  - NET_RAW
+services:
+  - mqtt:need
+options:
+  oven_ip: "192.168.178.124"
+  gateway_ip: "192.168.178.1"
+  mqtt_host: ""
+  mqtt_port: 0
+  mqtt_user: ""
+  mqtt_password: ""
+  log_level: "info"
+schema:
+  oven_ip: str
+  gateway_ip: str
+  mqtt_host: "str?"
+  mqtt_port: "int?"
+  mqtt_user: "str?"
+  mqtt_password: "str?"
+  log_level: "list(debug|info|warning|error)?"
