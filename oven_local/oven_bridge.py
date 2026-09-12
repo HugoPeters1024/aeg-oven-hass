@@ -18,7 +18,8 @@ from scapy.all import ARP, Ether, srp, sendp, get_if_hwaddr, conf
 
 OVEN   = os.environ.get("OVEN_IP", "192.168.178.124")
 GW     = os.environ.get("GATEWAY_IP", "192.168.178.1")
-PORT   = 8883
+OVEN_PORT   = 8883      # the port the oven dials (we redirect it)
+LISTEN_PORT = 18883     # our broker's real listen port; 8883 is taken by Mosquitto on this host
 DATA   = "/data"
 EC_CRT = f"{DATA}/fake_broker_ec.crt"; EC_KEY = f"{DATA}/fake_broker_ec.key"
 RSA_CRT= f"{DATA}/fake_broker.crt";    RSA_KEY= f"{DATA}/fake_broker.key"
@@ -206,8 +207,8 @@ def main():
     # forwarding + redirect the oven's 8883 into us; reset its existing cloud flow
     sh("sysctl -w net.ipv4.ip_forward=1")
     sh("sysctl -w net.ipv4.conf.all.send_redirects=0")
-    sh(f"iptables -t nat -A PREROUTING -i {iface} -p tcp -s {OVEN} --dport {PORT} -j REDIRECT --to-ports {PORT}")
-    sh(f"iptables -A FORWARD -i {iface} -p tcp -s {OVEN} --dport {PORT} -j REJECT --reject-with tcp-reset")
+    sh(f"iptables -t nat -A PREROUTING -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REDIRECT --to-ports {LISTEN_PORT}")
+    sh(f"iptables -A FORWARD -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REJECT --reject-with tcp-reset")
     sh(f"conntrack -D -s {OVEN} 2>/dev/null")
 
     def poison(a,am,sp): sendp(Ether(dst=am)/ARP(op=2,pdst=a,hwdst=am,psrc=sp,hwsrc=my_mac),iface=iface)
@@ -221,8 +222,8 @@ def main():
         stop.set(); time.sleep(0.3)
         for _ in range(5):
             heal(OVEN,oven_mac,GW,gw_mac); heal(GW,gw_mac,OVEN,oven_mac); time.sleep(0.1)
-        sh(f"iptables -t nat -D PREROUTING -i {iface} -p tcp -s {OVEN} --dport {PORT} -j REDIRECT --to-ports {PORT}")
-        sh(f"iptables -D FORWARD -i {iface} -p tcp -s {OVEN} --dport {PORT} -j REJECT --reject-with tcp-reset")
+        sh(f"iptables -t nat -D PREROUTING -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REDIRECT --to-ports {LISTEN_PORT}")
+        sh(f"iptables -D FORWARD -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REJECT --reject-with tcp-reset")
         try: mqc.publish(AVAIL, "offline", retain=True); mqc.loop_stop()
         except Exception: pass
         log("info", "cleaned up ARP / iptables"); os._exit(0)
@@ -239,8 +240,8 @@ def main():
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("0.0.0.0", PORT)); srv.listen(5); srv.settimeout(1.0)
-    log("info", f"local broker listening on {myip}:{PORT}")
+    srv.bind(("0.0.0.0", LISTEN_PORT)); srv.listen(5); srv.settimeout(1.0)
+    log("info", f"local broker listening on {myip}:{LISTEN_PORT} (oven dials {OVEN_PORT}, redirected)")
 
     while not stop.is_set():
         try: raw, addr = srv.accept()
