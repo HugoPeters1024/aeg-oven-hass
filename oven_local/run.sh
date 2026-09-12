@@ -2,6 +2,7 @@
 # Entry point: read add-on options, resolve MQTT credentials, launch the bridge.
 
 export OVEN_IP="$(bashio::config 'oven_ip')"
+export OVEN_MAC="$(bashio::config 'oven_mac')"
 export GATEWAY_IP="$(bashio::config 'gateway_ip')"
 export LOG_LEVEL="$(bashio::config 'log_level')"
 

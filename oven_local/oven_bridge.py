@@ -17,6 +17,7 @@ import paho.mqtt.client as mqtt
 from scapy.all import ARP, Ether, srp, sendp, get_if_hwaddr, conf
 
 OVEN   = os.environ.get("OVEN_IP", "192.168.178.124")
+OVEN_MAC = (os.environ.get("OVEN_MAC") or "").strip()
 GW     = os.environ.get("GATEWAY_IP", "192.168.178.1")
 OVEN_PORT   = 8883      # the port the oven dials (we redirect it)
 LISTEN_PORT = 18883     # our broker's real listen port; 8883 is taken by Mosquitto on this host
@@ -198,7 +199,14 @@ def resolve_mac(iface, ip):
     for _,x in ans: return x.hwsrc
     return None
 
+def find_ip_by_mac(iface, target, subnet):
+    ans,_ = srp(Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(pdst=subnet), timeout=5, iface=iface)
+    for _,r in ans:
+        if r.hwsrc.lower() == target.lower(): return r.psrc
+    return None
+
 def main():
+    global OVEN
     iface, myip = autodetect()
     if not iface or not myip:
         log("error", f"cannot find route to {GW}"); sys.exit(1)
@@ -207,7 +215,16 @@ def main():
     log("info", f"iface={iface} me={myip}/{my_mac}")
     ensure_certs()
 
-    oven_mac = resolve_mac(iface, OVEN); gw_mac = resolve_mac(iface, GW)
+    # locate the oven by MAC if the configured IP isn't it (survives DHCP changes)
+    oven_mac = resolve_mac(iface, OVEN)
+    if OVEN_MAC and (not oven_mac or oven_mac.lower() != OVEN_MAC.lower()):
+        subnet = re.sub(r"\.\d+$", ".0/24", myip)
+        log("info", f"{OVEN} isn't the oven (mac={oven_mac}); scanning {subnet} for {OVEN_MAC}")
+        found = find_ip_by_mac(iface, OVEN_MAC, subnet)
+        if not found:
+            log("error", f"oven MAC {OVEN_MAC} not found on {subnet}; is it online?"); sys.exit(1)
+        OVEN = found; oven_mac = OVEN_MAC; log("info", f"found oven at {OVEN}")
+    gw_mac = resolve_mac(iface, GW)
     if not oven_mac or not gw_mac:
         log("error", f"MAC resolve failed oven={oven_mac} gw={gw_mac}"); sys.exit(1)
     log("info", f"oven {OVEN}={oven_mac} gw {GW}={gw_mac}")
