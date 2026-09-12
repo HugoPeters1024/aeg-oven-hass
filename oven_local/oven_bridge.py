@@ -50,6 +50,13 @@ def log(level, *a):
         print(f"[{level.upper()}]", *a, flush=True)
 
 def sh(c): return subprocess.run(c, shell=True, capture_output=True, text=True)
+def shl(c, label=""):
+    r = sh(c); tag = label or c
+    if r.returncode != 0:
+        log("warning", f"[{tag}] rc={r.returncode} {(r.stderr or r.stdout).strip()}")
+    else:
+        log("info", f"[{tag}] ok")
+    return r
 
 # ---------------------------------------------------------------- entity map
 # key -> how to expose it in HA. decode turns the raw value bytes into a state string.
@@ -75,8 +82,8 @@ def obj_id(key): return key.replace(":", "_").lower()
 def state_topic(key): return f"{BASE}/{obj_id(key)}/state"
 
 # ---------------------------------------------------------------- MQTT (to HA)
-try:   # paho-mqtt 2.x requires an explicit callback API version
-    mqc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id="oven_local_bridge")
+try:   # paho-mqtt 2.x
+    mqc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="oven_local_bridge")
 except (AttributeError, TypeError):   # paho-mqtt 1.x
     mqc = mqtt.Client(client_id="oven_local_bridge")
 if MQTT_USER: mqc.username_pw_set(MQTT_USER, MQTT_PASS)
@@ -100,8 +107,9 @@ def publish_discovery():
         mqc.publish(topic, json.dumps(cfg), retain=True)
     log("info", f"published discovery for {len(ENTITIES)} entities")
 
-def on_connect(c, u, flags, rc):
-    log("info", f"MQTT connected rc={rc}")
+def on_connect(c, u, flags, reason_code, properties=None):
+    # signature works for paho 1.x (4 args) and 2.x (5 args with reason_code + properties)
+    log("info", f"MQTT connected: {reason_code}")
     publish_discovery()
     c.publish(AVAIL, "offline", retain=True)   # until the oven actually connects
 
@@ -205,11 +213,22 @@ def main():
     log("info", f"oven {OVEN}={oven_mac} gw {GW}={gw_mac}")
 
     # forwarding + redirect the oven's 8883 into us; reset its existing cloud flow
-    sh("sysctl -w net.ipv4.ip_forward=1")
-    sh("sysctl -w net.ipv4.conf.all.send_redirects=0")
-    sh(f"iptables -t nat -A PREROUTING -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REDIRECT --to-ports {LISTEN_PORT}")
-    sh(f"iptables -A FORWARD -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REJECT --reject-with tcp-reset")
+    log("info", "iptables: " + sh("iptables --version").stdout.strip())
+    shl("sysctl -w net.ipv4.ip_forward=1", "ip_forward=1")
+    log("info", "ip_forward is now " + sh("cat /proc/sys/net/ipv4/ip_forward").stdout.strip())
+    shl("sysctl -w net.ipv4.conf.all.send_redirects=0", "send_redirects=0")
+    shl(f"iptables -t nat -A PREROUTING -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REDIRECT --to-ports {LISTEN_PORT}", "nat REDIRECT add")
+    shl(f"iptables -A FORWARD -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REJECT --reject-with tcp-reset", "FORWARD reject add")
     sh(f"conntrack -D -s {OVEN} 2>/dev/null")
+    log("info", "nat PREROUTING now:\n" + sh("iptables -t nat -S PREROUTING").stdout.strip())
+    def diag():
+        while not stop.is_set():
+            time.sleep(20)
+            out = sh("iptables -t nat -L PREROUTING -n -v").stdout
+            for ln in out.splitlines():
+                if "REDIRECT" in ln or str(LISTEN_PORT) in ln:
+                    log("info", "REDIRECT counters: " + " ".join(ln.split()))
+    threading.Thread(target=diag, daemon=True).start()
 
     def poison(a,am,sp): sendp(Ether(dst=am)/ARP(op=2,pdst=a,hwdst=am,psrc=sp,hwsrc=my_mac),iface=iface)
     def heal(a,am,rp,rm): sendp(Ether(dst=am)/ARP(op=2,pdst=a,hwdst=am,psrc=rp,hwsrc=rm),iface=iface)
