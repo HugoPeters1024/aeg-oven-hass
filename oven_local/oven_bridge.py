@@ -18,10 +18,13 @@ from scapy.all import ARP, Ether, srp, sendp, get_if_hwaddr, conf
 
 OVEN   = os.environ.get("OVEN_IP", "192.168.178.124")
 OVEN_MAC = (os.environ.get("OVEN_MAC") or "").strip()
+# own_redirect=false -> listen-only: something else (a router DNAT or a laptop relay) sends the
+# oven to us, so we don't ARP-spoof or touch iptables, and we accept the relayed connection.
+OWN_REDIRECT = (os.environ.get("OWN_REDIRECT", "true").strip().lower() != "false")
 GW     = os.environ.get("GATEWAY_IP", "192.168.178.1")
 OVEN_PORT   = 8883      # the port the oven dials (we redirect it)
 LISTEN_PORT = 18883     # our broker's real listen port; 8883 is taken by Mosquitto on this host
-DATA   = "/data"
+DATA   = os.environ.get("DATA_DIR", "/data")
 EC_CRT = f"{DATA}/fake_broker_ec.crt"; EC_KEY = f"{DATA}/fake_broker_ec.key"
 RSA_CRT= f"{DATA}/fake_broker.crt";    RSA_KEY= f"{DATA}/fake_broker.key"
 SUBJ   = '-subj "/CN=mqtt-ecc.eu.ecp.electrolux.com" -addext "subjectAltName=DNS:mqtt-ecc.eu.ecp.electrolux.com"'
@@ -115,15 +118,18 @@ def on_connect(c, u, flags, reason_code, properties=None):
     c.publish(AVAIL, "offline", retain=True)   # until the oven actually connects
 
 def mqtt_start():
-    while True:
-        try:
-            mqc.on_connect = on_connect
-            mqc.connect(MQTT_HOST, MQTT_PORT, keepalive=60)
-            mqc.loop_start()
-            return
-        except Exception as ex:
-            log("warning", f"MQTT connect to {MQTT_HOST}:{MQTT_PORT} failed: {ex}; retrying in 5s")
-            time.sleep(5)
+    # non-blocking: retry in the background so the broker/redirect runs even if MQTT is down
+    def _run():
+        while True:
+            try:
+                mqc.on_connect = on_connect
+                mqc.connect(MQTT_HOST, MQTT_PORT, keepalive=60)
+                mqc.loop_start()
+                return
+            except Exception as ex:
+                log("warning", f"MQTT connect to {MQTT_HOST}:{MQTT_PORT} failed: {ex}; retrying in 5s")
+                time.sleep(5)
+    threading.Thread(target=_run, daemon=True).start()
 
 # ---------------------------------------------------------------- hacl decode
 def decode_hacl(hexstr):
@@ -180,7 +186,12 @@ def mk(typ, payload=b""): return bytes([typ])+enc_len(len(payload))+payload
 
 # ---------------------------------------------------------------- network plumbing
 stop = threading.Event()
+IFACE_OVERRIDE = (os.environ.get("INTERFACE") or "").strip()
 def autodetect():
+    if IFACE_OVERRIDE:   # force a specific NIC (e.g. wlan0, to ARP on the oven's Wi-Fi)
+        ipline = sh(f"ip -o -4 addr show dev {IFACE_OVERRIDE}").stdout
+        m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", ipline)
+        return IFACE_OVERRIDE, (m.group(1) if m else None)
     r = sh(f"ip route get {GW}").stdout
     iface = (re.search(r"dev (\S+)", r) or [None,None])[1]
     myip  = (re.search(r"src (\S+)", r) or [None,None])[1]
@@ -215,85 +226,94 @@ def main():
     log("info", f"iface={iface} me={myip}/{my_mac}")
     ensure_certs()
 
-    # locate the oven by MAC if the configured IP isn't it (survives DHCP changes)
-    oven_mac = resolve_mac(iface, OVEN)
-    if OVEN_MAC and (not oven_mac or oven_mac.lower() != OVEN_MAC.lower()):
-        subnet = re.sub(r"\.\d+$", ".0/24", myip)
-        log("info", f"{OVEN} isn't the oven (mac={oven_mac}); scanning {subnet} for {OVEN_MAC}")
-        found = find_ip_by_mac(iface, OVEN_MAC, subnet)
-        if not found:
-            log("error", f"oven MAC {OVEN_MAC} not found on {subnet}; is it online?"); sys.exit(1)
-        OVEN = found; oven_mac = OVEN_MAC; log("info", f"found oven at {OVEN}")
-    gw_mac = resolve_mac(iface, GW)
-    if not oven_mac or not gw_mac:
-        log("error", f"MAC resolve failed oven={oven_mac} gw={gw_mac}"); sys.exit(1)
-    log("info", f"oven {OVEN}={oven_mac} gw {GW}={gw_mac}")
+    oven_mac = gw_mac = None
+    if OWN_REDIRECT:
+        # locate the oven by MAC if the configured IP isn't it (survives DHCP changes)
+        oven_mac = resolve_mac(iface, OVEN)
+        if OVEN_MAC and (not oven_mac or oven_mac.lower() != OVEN_MAC.lower()):
+            subnet = re.sub(r"\.\d+$", ".0/24", myip)
+            log("info", f"{OVEN} isn't the oven (mac={oven_mac}); scanning {subnet} for {OVEN_MAC}")
+            found = find_ip_by_mac(iface, OVEN_MAC, subnet)
+            if not found:
+                log("error", f"oven MAC {OVEN_MAC} not found on {subnet}; is it online?"); sys.exit(1)
+            OVEN = found; oven_mac = OVEN_MAC; log("info", f"found oven at {OVEN}")
+        gw_mac = resolve_mac(iface, GW)
+        if not oven_mac or not gw_mac:
+            log("error", f"MAC resolve failed oven={oven_mac} gw={gw_mac}"); sys.exit(1)
+        log("info", f"oven {OVEN}={oven_mac} gw {GW}={gw_mac}")
 
-    # forwarding + redirect the oven's 8883 into us; reset its existing cloud flow
-    log("info", "iptables: " + sh("iptables --version").stdout.strip())
-    fwd = sh("cat /proc/sys/net/ipv4/ip_forward").stdout.strip()
-    if fwd != "1":
-        shl("sysctl -w net.ipv4.ip_forward=1", "ip_forward=1")   # may be read-only; host is usually already 1
-    log("info", f"ip_forward = {sh('cat /proc/sys/net/ipv4/ip_forward').stdout.strip()}")
+        # forwarding + redirect the oven's 8883 into us; reset its existing cloud flow
+        log("info", "iptables: " + sh("iptables --version").stdout.strip())
+        fwd = sh("cat /proc/sys/net/ipv4/ip_forward").stdout.strip()
+        if fwd != "1":
+            shl("sysctl -w net.ipv4.ip_forward=1", "ip_forward=1")   # may be read-only; host is usually already 1
+        log("info", f"ip_forward = {sh('cat /proc/sys/net/ipv4/ip_forward').stdout.strip()}")
 
-    # scrub leftover rules from earlier runs/versions: a crash skips cleanup(), so stale rules
-    # persist in the host nat table and an old '--to-ports 8883' rule would shadow ours.
-    for tp in {8883, 18883, LISTEN_PORT, OVEN_PORT}:
+        # scrub leftover rules from earlier runs/versions: a crash skips cleanup(), so stale rules
+        # persist in the host nat table and an old '--to-ports 8883' rule would shadow ours.
+        for tp in {8883, 18883, LISTEN_PORT, OVEN_PORT}:
+            for _ in range(20):
+                if sh(f"iptables -t nat -D PREROUTING -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REDIRECT --to-ports {tp}").returncode != 0:
+                    break
         for _ in range(20):
-            if sh(f"iptables -t nat -D PREROUTING -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REDIRECT --to-ports {tp}").returncode != 0:
+            if sh(f"iptables -D FORWARD -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REJECT --reject-with tcp-reset").returncode != 0:
                 break
-    for _ in range(20):
-        if sh(f"iptables -D FORWARD -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REJECT --reject-with tcp-reset").returncode != 0:
-            break
 
-    shl(f"iptables -t nat -A PREROUTING -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REDIRECT --to-ports {LISTEN_PORT}", "nat REDIRECT add")
-    shl(f"iptables -A FORWARD -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REJECT --reject-with tcp-reset", "FORWARD reject add")
-    sh(f"conntrack -D -s {OVEN} 2>/dev/null")
-    log("info", "nat PREROUTING now:\n" + sh("iptables -t nat -S PREROUTING").stdout.strip())
-    def diag():
-        while not stop.is_set():
-            time.sleep(20)
-            for ln in sh("iptables -t nat -L PREROUTING -n -v").stdout.splitlines():
-                if "REDIRECT" in ln:
-                    p = ln.split(); log("info", f"REDIRECT rule: pkts={p[0]} bytes={p[1]}")
-            for ln in sh("iptables -L FORWARD -n -v").stdout.splitlines():
-                if "REJECT" in ln and OVEN in ln:
-                    p = ln.split(); log("info", f"FORWARD-reject rule: pkts={p[0]} bytes={p[1]}")
-            # are ANY oven 8883 packets even reaching this Pi? (proves the ARP diversion works)
-            cap = sh(f"timeout 6 tcpdump -i {iface} -nn -c 6 host {OVEN} and tcp port 8883 2>&1")
-            n = sum(1 for l in cap.stdout.splitlines() if OVEN in l and ">" in l)
-            log("info", f"oven:8883 packets seen at Pi in ~6s: {n}")
-            # and is the oven talking to the cloud at all (any traffic to it)?
-            cap2 = sh(f"timeout 4 tcpdump -i {iface} -nn -c 6 host {OVEN} 2>&1")
-            n2 = sum(1 for l in cap2.stdout.splitlines() if OVEN in l and ">" in l)
-            log("info", f"any oven packets seen at Pi in ~4s: {n2}")
-    threading.Thread(target=diag, daemon=True).start()
+        shl(f"iptables -t nat -A PREROUTING -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REDIRECT --to-ports {LISTEN_PORT}", "nat REDIRECT add")
+        shl(f"iptables -A FORWARD -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REJECT --reject-with tcp-reset", "FORWARD reject add")
+        sh(f"conntrack -D -s {OVEN} 2>/dev/null")
+        log("info", "nat PREROUTING now:\n" + sh("iptables -t nat -S PREROUTING").stdout.strip())
+        def diag():
+            while not stop.is_set():
+                time.sleep(20)
+                for ln in sh("iptables -t nat -L PREROUTING -n -v").stdout.splitlines():
+                    if "REDIRECT" in ln:
+                        p = ln.split(); log("info", f"REDIRECT rule: pkts={p[0]} bytes={p[1]}")
+                for ln in sh("iptables -L FORWARD -n -v").stdout.splitlines():
+                    if "REJECT" in ln and OVEN in ln:
+                        p = ln.split(); log("info", f"FORWARD-reject rule: pkts={p[0]} bytes={p[1]}")
+                # are ANY oven 8883 packets even reaching this Pi? (proves the ARP diversion works)
+                cap = sh(f"timeout 6 tcpdump -i {iface} -nn -c 6 host {OVEN} and tcp port 8883 2>&1")
+                n = sum(1 for l in cap.stdout.splitlines() if OVEN in l and ">" in l)
+                log("info", f"oven:8883 packets seen at Pi in ~6s: {n}")
+                # and is the oven talking to the cloud at all (any traffic to it)?
+                cap2 = sh(f"timeout 4 tcpdump -i {iface} -nn -c 6 host {OVEN} 2>&1")
+                n2 = sum(1 for l in cap2.stdout.splitlines() if OVEN in l and ">" in l)
+                log("info", f"any oven packets seen at Pi in ~4s: {n2}")
+        threading.Thread(target=diag, daemon=True).start()
 
-    def poison(a,am,sp):
-        # directed ARP reply AND a spoofed ARP request (some stacks only cache from requests)
-        sendp(Ether(dst=am)/ARP(op=2,pdst=a,hwdst=am,psrc=sp,hwsrc=my_mac),iface=iface)
-        sendp(Ether(dst=am)/ARP(op=1,pdst=a,hwdst=am,psrc=sp,hwsrc=my_mac),iface=iface)
-    def heal(a,am,rp,rm): sendp(Ether(dst=am)/ARP(op=2,pdst=a,hwdst=am,psrc=rp,hwsrc=rm),iface=iface)
-    def spoof():
-        while not stop.is_set():
-            poison(OVEN,oven_mac,GW); poison(GW,gw_mac,OVEN)
-            # broadcast gratuitous replies too, in case directed frames don't cross the
-            # ethernet<->wifi bridge in the router
-            sendp(Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(op=2,pdst=OVEN,psrc=GW,hwsrc=my_mac),iface=iface)
-            sendp(Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(op=2,pdst=GW,psrc=OVEN,hwsrc=my_mac),iface=iface)
-            time.sleep(0.5)
-    threading.Thread(target=spoof, daemon=True).start()
+        def poison(a,am,sp):
+            # directed ARP reply AND a spoofed ARP request (some stacks only cache from requests)
+            sendp(Ether(dst=am)/ARP(op=2,pdst=a,hwdst=am,psrc=sp,hwsrc=my_mac),iface=iface)
+            sendp(Ether(dst=am)/ARP(op=1,pdst=a,hwdst=am,psrc=sp,hwsrc=my_mac),iface=iface)
+        def heal(a,am,rp,rm): sendp(Ether(dst=am)/ARP(op=2,pdst=a,hwdst=am,psrc=rp,hwsrc=rm),iface=iface)
+        def spoof():
+            while not stop.is_set():
+                poison(OVEN,oven_mac,GW); poison(GW,gw_mac,OVEN)
+                # broadcast gratuitous replies too, in case directed frames don't cross the
+                # ethernet<->wifi bridge in the router
+                sendp(Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(op=2,pdst=OVEN,psrc=GW,hwsrc=my_mac),iface=iface)
+                sendp(Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(op=2,pdst=GW,psrc=OVEN,hwsrc=my_mac),iface=iface)
+                time.sleep(0.5)
+        threading.Thread(target=spoof, daemon=True).start()
 
-    def cleanup(*_):
-        stop.set(); time.sleep(0.3)
-        for _ in range(5):
-            heal(OVEN,oven_mac,GW,gw_mac); heal(GW,gw_mac,OVEN,oven_mac); time.sleep(0.1)
-        sh(f"iptables -t nat -D PREROUTING -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REDIRECT --to-ports {LISTEN_PORT}")
-        sh(f"iptables -D FORWARD -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REJECT --reject-with tcp-reset")
-        try: mqc.publish(AVAIL, "offline", retain=True); mqc.loop_stop()
-        except Exception: pass
-        log("info", "cleaned up ARP / iptables"); os._exit(0)
-    signal.signal(signal.SIGTERM, cleanup); signal.signal(signal.SIGINT, cleanup)
+        def cleanup(*_):
+            stop.set(); time.sleep(0.3)
+            for _ in range(5):
+                heal(OVEN,oven_mac,GW,gw_mac); heal(GW,gw_mac,OVEN,oven_mac); time.sleep(0.1)
+            sh(f"iptables -t nat -D PREROUTING -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REDIRECT --to-ports {LISTEN_PORT}")
+            sh(f"iptables -D FORWARD -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REJECT --reject-with tcp-reset")
+            try: mqc.publish(AVAIL, "offline", retain=True); mqc.loop_stop()
+            except Exception: pass
+            log("info", "cleaned up ARP / iptables"); os._exit(0)
+        signal.signal(signal.SIGTERM, cleanup); signal.signal(signal.SIGINT, cleanup)
+    else:
+        log("info", "listen-only mode: external redirect (router or laptop relay); not touching ARP/iptables.")
+        def cleanup(*_):
+            try: mqc.publish(AVAIL, "offline", retain=True); mqc.loop_stop()
+            except Exception: pass
+            os._exit(0)
+        signal.signal(signal.SIGTERM, cleanup); signal.signal(signal.SIGINT, cleanup)
 
     # TLS impersonation context
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -313,7 +333,7 @@ def main():
         try: raw, addr = srv.accept()
         except socket.timeout: continue
         except Exception: break
-        if not addr[0].startswith(OVEN):
+        if OWN_REDIRECT and not addr[0].startswith(OVEN):
             raw.close(); continue
         try: tls = ctx.wrap_socket(raw, server_side=True)
         except Exception as ex:

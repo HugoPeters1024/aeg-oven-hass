@@ -1,9 +1,18 @@
 #!/usr/bin/with-contenv bashio
 # Entry point: read add-on options, resolve MQTT credentials, launch the bridge.
+#
+# To verify the SAME bridge on a Wi-Fi laptop (proving the wired-Pi position is the blocker),
+# run this on the laptop instead (do NOT run it while the add-on is also active):
+#   wget -O /tmp/oven_bridge_prod.py http://192.168.178.27:8000/ha-addon/oven_local/oven_bridge.py
+#   sudo OVEN_MAC=44:3e:07:79:bf:4a GATEWAY_IP=192.168.178.1 DATA_DIR=/tmp/ovencerts \
+#        LOG_LEVEL=debug python3 /tmp/oven_bridge_prod.py
+# (or just: wget the verify_on_laptop.sh helper and `sudo bash verify_on_laptop.sh`)
 
 export OVEN_IP="$(bashio::config 'oven_ip')"
 export OVEN_MAC="$(bashio::config 'oven_mac')"
 export GATEWAY_IP="$(bashio::config 'gateway_ip')"
+export INTERFACE="$(bashio::config 'interface')"
+export OWN_REDIRECT="$(bashio::config 'own_redirect')"
 export LOG_LEVEL="$(bashio::config 'log_level')"
 
 # MQTT: prefer explicit options; otherwise use the Supervisor-provided MQTT service.
