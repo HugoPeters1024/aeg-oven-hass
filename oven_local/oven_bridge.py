@@ -214,9 +214,21 @@ def main():
 
     # forwarding + redirect the oven's 8883 into us; reset its existing cloud flow
     log("info", "iptables: " + sh("iptables --version").stdout.strip())
-    shl("sysctl -w net.ipv4.ip_forward=1", "ip_forward=1")
-    log("info", "ip_forward is now " + sh("cat /proc/sys/net/ipv4/ip_forward").stdout.strip())
-    shl("sysctl -w net.ipv4.conf.all.send_redirects=0", "send_redirects=0")
+    fwd = sh("cat /proc/sys/net/ipv4/ip_forward").stdout.strip()
+    if fwd != "1":
+        shl("sysctl -w net.ipv4.ip_forward=1", "ip_forward=1")   # may be read-only; host is usually already 1
+    log("info", f"ip_forward = {sh('cat /proc/sys/net/ipv4/ip_forward').stdout.strip()}")
+
+    # scrub leftover rules from earlier runs/versions: a crash skips cleanup(), so stale rules
+    # persist in the host nat table and an old '--to-ports 8883' rule would shadow ours.
+    for tp in {8883, 18883, LISTEN_PORT, OVEN_PORT}:
+        for _ in range(20):
+            if sh(f"iptables -t nat -D PREROUTING -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REDIRECT --to-ports {tp}").returncode != 0:
+                break
+    for _ in range(20):
+        if sh(f"iptables -D FORWARD -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REJECT --reject-with tcp-reset").returncode != 0:
+            break
+
     shl(f"iptables -t nat -A PREROUTING -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REDIRECT --to-ports {LISTEN_PORT}", "nat REDIRECT add")
     shl(f"iptables -A FORWARD -i {iface} -p tcp -s {OVEN} --dport {OVEN_PORT} -j REJECT --reject-with tcp-reset", "FORWARD reject add")
     sh(f"conntrack -D -s {OVEN} 2>/dev/null")
