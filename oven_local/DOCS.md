@@ -2,6 +2,31 @@
 
 ## Optional cloud relay (0.4.0)
 
+### Temporary certificate pinning (0.4.1)
+
+The Electrolux broker uses a private CA. Normal `ca` mode remains the default.
+For a supervised capture session, select `upstream_tls_mode: pinned` and supply `upstream_cert_sha256`.
+The value must contain the SHA-256 fingerprint of the complete DER-encoded server certificate, not its public key.
+Uppercase hex and colon-separated fingerprints are accepted.
+
+Pinned mode replaces CA, hostname, and certificate-expiry validation with an exact certificate match.
+The proxy still sends the configured hostname as TLS SNI. It checks the pin before starting either relay direction.
+An absent, malformed, or mismatched pin stops the connection. It never learns or replaces pins automatically.
+
+Obtaining a fingerprint from an unverified connection is a first-observation trust decision, not independent proof of identity.
+An attacker present during that observation could supply the initial certificate. Certificate renewal requires deliberate pin replacement.
+Never update the pin automatically after a mismatch.
+
+Add these options to the existing proxy configuration:
+
+```yaml
+upstream_tls_mode: pinned
+upstream_cert_sha256: "REPLACE_WITH_EXPLICIT_SHA256_FINGERPRINT"
+```
+
+Keep the oven idle and supervised. Start with one light toggle.
+After capture, select `bridge_mode: mock` and restart the add-on.
+
 Mock mode remains the default. Proxy mode connects the oven to the real cloud broker.
 The proxy verifies the cloud certificate and forwards bytes unchanged in both directions.
 It does not generate MQTT acknowledgements or replay commands.

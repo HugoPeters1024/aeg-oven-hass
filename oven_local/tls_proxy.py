@@ -1,10 +1,40 @@
 import asyncio
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
+import re
 import signal
 import ssl
 import time
+
+
+def upstream_security(mode, fingerprint):
+    if mode == 'ca':
+        return ssl.create_default_context(), None
+    if mode != 'pinned':
+        raise ValueError('UPSTREAM_TLS_MODE must be ca or pinned')
+    normalized = fingerprint.strip().replace(':', '').lower()
+    if not re.fullmatch(r'[0-9a-f]{64}', normalized):
+        raise ValueError('Pinned mode requires an explicit 64-digit SHA-256 certificate fingerprint')
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context, normalized
+
+
+def verify_upstream_pin(writer, expected):
+    if expected is None:
+        return
+    session = writer.get_extra_info('ssl_object')
+    certificate = session.getpeercert(binary_form=True) if session else None
+    if not certificate:
+        raise RuntimeError('Pinned upstream did not provide a certificate; no oven data forwarded')
+    actual = hashlib.sha256(certificate).hexdigest()
+    if not hmac.compare_digest(actual, expected):
+        raise RuntimeError('Upstream certificate pin mismatch; no oven data forwarded')
 
 
 class MQTTObserver:
@@ -93,7 +123,11 @@ async def serve_proxy(server_context, port, log, telemetry, availability):
     upstream_port = int(os.environ.get('UPSTREAM_PORT', '8883'))
     allowed_source = os.environ.get('PROXY_SOURCE_IP', '192.168.178.2')
     capture = os.environ.get('CAPTURE_COMMANDS', 'false').lower() == 'true'
-    upstream_context = ssl.create_default_context()
+    security_mode = os.environ.get('UPSTREAM_TLS_MODE', 'ca')
+    upstream_context, fingerprint = upstream_security(
+        security_mode, os.environ.get('UPSTREAM_CERT_SHA256', ''))
+    if fingerprint:
+        log('warning', 'Pinned TLS mode: explicit certificate trust replaces CA, hostname, and expiry validation')
     active = False
     clients = set()
 
@@ -128,12 +162,13 @@ async def serve_proxy(server_context, port, log, telemetry, availability):
                     upstream_reader, upstream_writer = await asyncio.wait_for(
                         asyncio.open_connection(entry[4][0], upstream_port, ssl=upstream_context,
                                                 server_hostname=hostname, ssl_handshake_timeout=10), 15)
+                    verify_upstream_pin(upstream_writer, fingerprint)
                     break
                 except (OSError, asyncio.TimeoutError) as error:
                     last_error = error
             if upstream_writer is None:
                 raise last_error or RuntimeError('No upstream connection')
-            log('info', 'TLS relay connected to verified cloud broker; real app commands are enabled')
+            log('info', f'TLS relay connected with {security_mode} verification; real app commands are enabled')
             pumps = [asyncio.create_task(relay(reader, upstream_writer,
                          MQTTObserver('oven-to-cloud', log, telemetry=telemetry))),
                      asyncio.create_task(relay(upstream_reader, writer,

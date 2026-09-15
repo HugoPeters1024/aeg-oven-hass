@@ -17,6 +17,8 @@ export LOG_LEVEL="$(bashio::config 'log_level')"
 export BRIDGE_MODE="$(bashio::config 'bridge_mode' 'mock')"
 export UPSTREAM_HOST="$(bashio::config 'upstream_host' 'mqtt-ecc.eu.ecp.electrolux.com')"
 export UPSTREAM_PORT="$(bashio::config 'upstream_port' '8883')"
+export UPSTREAM_TLS_MODE="$(bashio::config 'upstream_tls_mode' 'ca')"
+export UPSTREAM_CERT_SHA256="$(bashio::config 'upstream_cert_sha256')"
 export PROXY_SOURCE_IP="$(bashio::config 'proxy_source_ip' '192.168.178.2')"
 export CAPTURE_COMMANDS="$(bashio::config 'capture_commands' 'false')"
 
