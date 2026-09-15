@@ -8,12 +8,13 @@ RUN apk add --no-cache \
       iptables ip6tables iptables-legacy \
       conntrack-tools \
       tcpdump \
-      openssl \
+      openssl ca-certificates \
  && pip3 install --no-cache-dir --break-system-packages \
       scapy paho-mqtt
 
 COPY run.sh /run.sh
 COPY oven_bridge.py /oven_bridge.py
+COPY tls_proxy.py /tls_proxy.py
 RUN chmod a+x /run.sh
 
 CMD [ "/run.sh" ]

@@ -1,5 +1,42 @@
 # AEG Oven Local Bridge (PoC)
 
+## Optional cloud relay (0.4.0)
+
+Mock mode remains the default. Proxy mode connects the oven to the real cloud broker.
+The proxy verifies the cloud certificate and forwards bytes unchanged in both directions.
+It does not generate MQTT acknowledgements or replay commands.
+Telemetry decoding and Home Assistant publishing remain active.
+
+**Warning: Real app commands can start heating. Supervise the oven during testing.**
+
+After rebuilding the add-on, set these options:
+
+```yaml
+bridge_mode: proxy
+own_redirect: false
+upstream_host: mqtt-ecc.eu.ecp.electrolux.com
+upstream_port: 8883
+proxy_source_ip: 192.168.178.2
+capture_commands: true
+```
+
+Keep the existing MQTT credentials and OpenWrt rules unchanged.
+Start the add-on and inspect its logs. Test one light toggle with the oven idle.
+Return `bridge_mode` to `mock` and restart the add-on after the capture session.
+
+The Pi must resolve the cloud hostname to a public address. The proxy rejects private upstream addresses to prevent a local loop.
+The upstream TLS connection sends no client certificate. A cloud requirement for mutual TLS will prevent operation.
+Blocked oven HTTPS or time services can also prevent cloud authentication. Do not open unrestricted access to compensate.
+
+CONNECT and AUTH contents are never logged. PUBLISH contents are omitted by default.
+With `capture_commands: true`, cloud PUBLISH payloads on `cmd/` topics are logged as hex, limited to 4096 bytes.
+These payloads and topic names can contain sensitive identifiers or application secrets. Keep logs private.
+Other cloud payloads remain omitted. MQTT inspection assumes version 3.x; forwarding does not depend on successful inspection.
+Inspection stops for malformed frames or packets larger than 1 MiB, without stopping the relay.
+Only one authenticated TLS session from `proxy_source_ip` is relayed at a time.
+
+No deployed firmware or running service changes are required until you choose to rebuild and restart.
+
 Brings an AEG/Electrolux ECP oven into Home Assistant **without the cloud**, by impersonating
 the Electrolux MQTT broker on your LAN and republishing the oven's telemetry via MQTT Discovery.
 

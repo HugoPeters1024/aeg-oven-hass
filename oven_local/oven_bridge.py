@@ -218,6 +218,11 @@ def find_ip_by_mac(iface, target, subnet):
 
 def main():
     global OVEN
+    bridge_mode = os.environ.get("BRIDGE_MODE", "mock")
+    if bridge_mode not in ("mock", "proxy"):
+        raise ValueError("BRIDGE_MODE must be mock or proxy")
+    if bridge_mode == "proxy" and OWN_REDIRECT:
+        raise ValueError("Proxy mode requires own_redirect=false")
     iface, myip = autodetect()
     if not iface or not myip:
         log("error", f"cannot find route to {GW}"); sys.exit(1)
@@ -323,6 +328,17 @@ def main():
     try: ctx.set_ciphers("ALL:@SECLEVEL=0")
     except Exception: pass
     ctx.verify_mode = ssl.CERT_NONE
+
+    if bridge_mode == "proxy":
+        import asyncio
+        from tls_proxy import serve_proxy
+        try:
+            asyncio.run(serve_proxy(ctx, LISTEN_PORT, log, handle_state_json,
+                        lambda online: mqc.publish(AVAIL, "online" if online else "offline", retain=True)))
+        finally:
+            mqc.publish(AVAIL, "offline", retain=True)
+            mqc.loop_stop()
+        return
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

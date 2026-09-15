@@ -14,6 +14,11 @@ export GATEWAY_IP="$(bashio::config 'gateway_ip')"
 export INTERFACE="$(bashio::config 'interface')"
 export OWN_REDIRECT="$(bashio::config 'own_redirect')"
 export LOG_LEVEL="$(bashio::config 'log_level')"
+export BRIDGE_MODE="$(bashio::config 'bridge_mode' 'mock')"
+export UPSTREAM_HOST="$(bashio::config 'upstream_host' 'mqtt-ecc.eu.ecp.electrolux.com')"
+export UPSTREAM_PORT="$(bashio::config 'upstream_port' '8883')"
+export PROXY_SOURCE_IP="$(bashio::config 'proxy_source_ip' '192.168.178.2')"
+export CAPTURE_COMMANDS="$(bashio::config 'capture_commands' 'false')"
 
 # MQTT: prefer explicit options; otherwise use the Supervisor-provided MQTT service.
 if bashio::config.has_value 'mqtt_host'; then
