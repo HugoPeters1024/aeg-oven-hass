@@ -1,5 +1,5 @@
 name: "AEG Oven Local Bridge"
-version: "0.4.1"
+version: "0.4.2"
 slug: "oven_local"
 description: "Local bridge for an AEG/Electrolux oven. Impersonates the Electrolux MQTT broker on the LAN (ARP redirect) and publishes the oven's telemetry to Home Assistant via MQTT discovery. Proof of concept."
 url: "https://github.com/hugop/aeg-oven-local"

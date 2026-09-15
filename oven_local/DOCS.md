@@ -1,5 +1,16 @@
 # AEG Oven Local Bridge (PoC)
 
+## Relay diagnostics (0.4.2)
+
+At INFO level, CONNECT diagnostics show protocol version, flags, keepalive, and field lengths.
+Client IDs, usernames, passwords, and will contents remain omitted.
+MQTT 5 payload fields are not parsed using the MQTT 3 layout.
+Malformed CONNECT packets produce a diagnostic without changing forwarded bytes.
+Each relay direction reports received and forwarded byte counts on EOF or errors.
+TLS logs show protocol and cipher for each connection, without key material.
+The upstream connection has no client certificate. A server CertificateRequest does not alone prove that client authentication is mandatory.
+Do not weaken the certificate pin when investigating authentication failures.
+
 ## Optional cloud relay (0.4.0)
 
 ### Temporary certificate pinning (0.4.1)

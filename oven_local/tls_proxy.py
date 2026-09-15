@@ -37,6 +37,54 @@ def verify_upstream_pin(writer, expected):
         raise RuntimeError('Upstream certificate pin mismatch; no oven data forwarded')
 
 
+def connect_metadata(body):
+    offset = 0
+
+    def field():
+        nonlocal offset
+        if offset + 2 > len(body):
+            raise ValueError('truncated field length')
+        length = int.from_bytes(body[offset:offset + 2], 'big')
+        offset += 2
+        if offset + length > len(body):
+            raise ValueError('truncated field')
+        value = body[offset:offset + length]
+        offset += length
+        return value
+
+    protocol = field()
+    if offset + 4 > len(body):
+        raise ValueError('truncated CONNECT header')
+    level, flags = body[offset:offset + 2]
+    keepalive = int.from_bytes(body[offset + 2:offset + 4], 'big')
+    offset += 4
+    metadata = {
+        'protocol': protocol.decode('ascii') if protocol in (b'MQTT', b'MQIsdp') else '[unrecognized]',
+        'protocol_level': level,
+        'connect_flags': flags,
+        'keepalive_seconds': keepalive,
+        'clean_session_or_start': bool(flags & 2),
+        'will_present': bool(flags & 4),
+        'will_qos': (flags >> 3) & 3,
+        'will_retain': bool(flags & 32),
+        'password_present': bool(flags & 64),
+        'username_present': bool(flags & 128),
+    }
+    if level not in (3, 4):
+        metadata['payload_inspection'] = 'skipped: only MQTT 3.x field layout supported'
+        return metadata
+    metadata['client_id_bytes'] = len(field())
+    if flags & 4:
+        metadata['will_topic_bytes'] = len(field())
+        metadata['will_payload_bytes'] = len(field())
+    if flags & 128:
+        metadata['username_bytes'] = len(field())
+    if flags & 64:
+        metadata['password_bytes'] = len(field())
+    metadata['trailing_bytes'] = len(body) - offset
+    return metadata
+
+
 class MQTTObserver:
     def __init__(self, direction, log, capture_commands=False, telemetry=None, availability=None):
         self.direction = direction
@@ -83,6 +131,11 @@ class MQTTObserver:
                  'type': packet_type, 'bytes': len(body)}
         if packet_type in (1, 15):
             event['payload'] = '[authentication omitted]'
+            if packet_type == 1:
+                try:
+                    event['connect'] = connect_metadata(body)
+                except (ValueError, IndexError):
+                    event['connect_parse_error'] = 'malformed or truncated CONNECT; bytes still relayed unchanged'
         elif packet_type == 2 and len(body) >= 2:
             event['connect_result'] = body[1]
             if self.availability:
@@ -132,13 +185,23 @@ async def serve_proxy(server_context, port, log, telemetry, availability):
     clients = set()
 
     async def relay(reader, writer, observer):
-        while True:
-            chunk = await reader.read(16384)
-            if not chunk:
-                return
-            writer.write(chunk)
-            await writer.drain()
-            observer.feed(chunk)
+        received = 0
+        forwarded = 0
+        try:
+            while True:
+                chunk = await reader.read(16384)
+                if not chunk:
+                    log('info', f'{observer.direction}: EOF; received={received}, forwarded={forwarded}')
+                    return
+                received += len(chunk)
+                observer.feed(chunk)
+                writer.write(chunk)
+                await writer.drain()
+                forwarded += len(chunk)
+        except Exception as error:
+            log('warning', f'{observer.direction}: {type(error).__name__}; '
+                f'received={received}, forwarded={forwarded}')
+            raise
 
     async def connected(reader, writer):
         nonlocal active
@@ -168,6 +231,11 @@ async def serve_proxy(server_context, port, log, telemetry, availability):
                     last_error = error
             if upstream_writer is None:
                 raise last_error or RuntimeError('No upstream connection')
+            for label, stream in (('oven', writer), ('cloud', upstream_writer)):
+                session = stream.get_extra_info('ssl_object')
+                if session:
+                    log('info', f'TLS {label}: version={session.version()}, cipher={session.cipher()[0]}')
+            log('info', 'Upstream client certificate: none configured; cloud mutual-TLS requirements may reject this connection')
             log('info', f'TLS relay connected with {security_mode} verification; real app commands are enabled')
             pumps = [asyncio.create_task(relay(reader, upstream_writer,
                          MQTTObserver('oven-to-cloud', log, telemetry=telemetry))),
